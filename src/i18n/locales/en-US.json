@@ -520,7 +520,9 @@
     "shuffleMode": {
       "on": "Shuffle on",
       "off": "Shuffle off"
-    }
+    },
+    "reconnectTrying": "Connection error. Reconnecting ({attempt}/{total})",
+    "reconnectSuccess": "Connection restored"
   },
   "songList": {
     "title": "Title",
@@ -804,7 +806,8 @@
       "backupReset": "Backup & Reset",
       "debug": "Debug",
       "preset": "OCD Settings",
-      "envInfo": "Environment Info"
+      "envInfo": "Environment Info",
+      "networkRecovery": "Network reconnection"
     },
     "about": {
       "checkUpdate": "Check for Updates",
@@ -2230,6 +2233,21 @@
       "button": "Clear All",
       "confirmTitle": "Clear all database caches?",
       "confirmDesc": "All database caches above will be cleared. This cannot be undone."
+    },
+    "autoReconnect": {
+      "label": "Automatic reconnection",
+      "description": "Try reloading several times when the network is unstable."
+    },
+    "reconnectAttempts": {
+      "label": "Maximum reconnection attempts",
+      "description": "Maximum number of reconnection attempts."
+    },
+    "reconnectFailureAction": {
+      "label": "On failure",
+      "description": "Choose what happens after all reconnection attempts fail.",
+      "pause": "Keep progress and pause current track",
+      "next": "Skip to next track",
+      "stop": "Reset current track progress"
     }
   },
   "collection": {

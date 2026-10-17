@@ -30,6 +30,7 @@ export const useStatusStore = defineStore(
     const outputDevices = ref<AudioDevice[]>([]);
     /** 歌曲加载 */
     const trackLoading = ref(false);
+    const networkReconnecting = ref(false);
     /** 原生输出回调正在混合相邻两曲 */
     const transitioning = ref(false);
     /** 全屏播放器展开状态 */
@@ -99,7 +100,7 @@ export const useStatusStore = defineStore(
     /** 是否暂停 */
     const isPaused = computed(() => state.value === "paused");
     /** 是否加载中 */
-    const isLoading = computed(() => trackLoading.value);
+    const isLoading = computed(() => trackLoading.value && !networkReconnecting.value);
     /** 播放进度 */
     const progress = computed(() => (duration.value > 0 ? position.value / duration.value : 0));
     /**
@@ -130,6 +131,7 @@ export const useStatusStore = defineStore(
       isLoading,
       progress,
       trackLoading,
+      networkReconnecting,
       transitioning,
       isPlayerExpanded,
       outerQueueOpen,

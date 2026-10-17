@@ -3,6 +3,7 @@ import { TRANSITION_LOOKAHEAD_MS } from "@shared/constants/playback";
 import type { TagEditRequest, TagWriteOutcome } from "@shared/types/tagEditor";
 import type { PersonalFmOptions } from "@/types/netease";
 import { handleEvent } from "./events";
+import { NetworkRecovery } from "./networkRecovery";
 import type { RepeatMode, ShuffleMode } from "@/stores/status";
 import { useMediaStore } from "@/stores/media";
 import { useSettingsStore } from "@/stores/settings";
@@ -42,6 +43,8 @@ import i18n from "@/i18n";
 
 /** 加载运行时选项 */
 interface LoadRuntimeOptions {
+  /** 热恢复期间保留的显示进度 */
+  resumePosition?: number;
   /** 待消费的原生预载槽位标识，仅用于首次加载尝试 */
   preparedId?: string;
   /** 是否抑制错误提示 */
@@ -79,6 +82,9 @@ let loadToken = 0;
 let trackToken = 0;
 /** 暂停操作代次，防止热重载覆盖期间的手动暂停 */
 let pauseToken = 0;
+let activeRecovery: NetworkRecovery | null = null;
+let pendingNetworkResume: { trackId: string; position: number } | null = null;
+let lastSourceRecovery: { trackId: string; position: number } | null = null;
 let transitionInFlight = false;
 let lastLoggedTransitionId: string | null = null;
 /** 连续加载失败计数，成功时重置 */
@@ -166,6 +172,10 @@ export const load = async (
   seekTarget = null;
   playback.setSeeking(false);
   resetForLoad(meta?.duration ?? 0, options.transitionResult?.data?.playback);
+  if (options.resumePosition !== undefined) {
+    status.position = options.resumePosition;
+    playback.setCurrentTime(options.resumePosition, { force: true });
+  }
   // 非本地并行歌词与取色
   const isOnline = meta?.source !== "local";
   if (isOnline) {
@@ -292,6 +302,7 @@ const loadTrackSourceWithFallback = async (
   retryOnAnyFailure = false,
   initialResolved?: ResolvedTrackSource | null,
   preparedId?: string,
+  resumePosition?: number,
 ): Promise<LoadSourceResult> => {
   const retry = createSourceRetryState();
   let firstTry = initialResolved ?? null;
@@ -311,6 +322,7 @@ const loadTrackSourceWithFallback = async (
     const result = await load(resolved.source, autoPlay, track, {
       preparedId: usingInitial ? preparedId : undefined,
       suppressErrorToast: true,
+      resumePosition,
       context,
     });
     if (!shouldContinue()) return { status: "cancelled" };
@@ -352,6 +364,9 @@ const loadTrack = async (
   transitionSource?: ResolvedTrackSource,
 ): Promise<void> => {
   if (!track) return;
+  cancelSourceRecovery();
+  pendingNetworkResume = null;
+  lastSourceRecovery = null;
   // 跳过指定关键词歌曲
   const settings = useSettingsStore();
   if (
@@ -430,20 +445,31 @@ const loadTrack = async (
   if (shouldSkip) await skipOnFailure(myToken, () => trackToken, autoPlay);
 };
 
+interface ReloadRecoveryOptions {
+  signal: AbortSignal;
+  position: number;
+  onError: (error: string) => void;
+}
+
 /**
  * 热替换当前播放
  * 切换在线音质、或在线 URL 过期时调用：重新解析 URL 并从当前进度续播
  * @param forcePlay - 重载后强制播放
+ * @param recovery - 网络恢复的取消信号、固定进度和错误回调
  * @returns 是否完成（成功或被更新的加载接管）；解析/加载失败返回 false，调用方据此决定是否跳曲
  */
-export const reloadCurrentTrack = async (forcePlay?: boolean): Promise<boolean> => {
+export const reloadCurrentTrack = async (
+  forcePlay?: boolean,
+  recovery?: ReloadRecoveryOptions,
+): Promise<boolean> => {
   const media = useMediaStore();
   const track = media.track;
   if (!track || track.source === "local") return false;
   const status = useStatusStore();
   const shouldPlay = forcePlay ?? status.isPlaying;
+  if (!recovery) cancelSourceRecovery();
   const myPauseToken = pauseToken;
-  const resumePosition = Math.round(playback.getCurrentTime());
+  const resumePosition = recovery?.position ?? Math.round(playback.getCurrentTime());
   // 抢占加载令牌，与 loadTrack 互相取消
   const myToken = ++trackToken;
   invalidateNextTrackPreload();
@@ -453,28 +479,62 @@ export const reloadCurrentTrack = async (forcePlay?: boolean): Promise<boolean> 
     track,
     media.playbackContext,
     false,
-    () => myToken === trackToken,
+    () => myToken === trackToken && !recovery?.signal.aborted,
     true,
+    undefined,
+    undefined,
+    resumePosition,
   );
   // 被更新的加载接管：由它负责结果，不算本次失败
   if (loaded.status === "cancelled") return true;
   if (loaded.status === "unresolved") {
-    if (loaded.error) handleError(loaded.error);
+    if (loaded.error) {
+      if (recovery) recovery.onError(loaded.error);
+      else handleError(loaded.error);
+    }
     status.trackLoading = false;
     return false;
   }
   if (!loaded.result.ok) {
-    if (loaded.result.error) handleError(loaded.result.error);
+    if (loaded.result.error) {
+      if (recovery) recovery.onError(loaded.result.error);
+      else handleError(loaded.result.error);
+    }
     return false;
+  }
+  if (recovery && activeRecovery) {
+    status.state = activeRecovery.wantsPlay ? "playing" : "paused";
   }
   let resumeToken = myToken;
   if (resumePosition > 0) {
-    const seeking = seek(resumePosition);
+    let seekError: string | undefined;
+    const seeking = seek(resumePosition, false, (error) => {
+      seekError = error;
+    });
     /** seek 会推进加载代次，后续只接受这次进度恢复的结果 */
     resumeToken = trackToken;
     await seeking;
-    if (resumeToken !== trackToken) return true;
+    if (resumeToken !== trackToken || recovery?.signal.aborted) return true;
+    if (seekError) {
+      if (recovery) recovery.onError(seekError);
+      else handleError(seekError);
+      return false;
+    }
   }
+  if (recovery && resumePosition > 0) {
+    // 原生 seek 的回退重载可能从零开始，续播前必须确认引擎实际位置。
+    const snapshot = await window.api.player.getStatus();
+    if (resumeToken !== trackToken || recovery.signal.aborted) return true;
+    if (!snapshot.success || !snapshot.data) {
+      recovery.onError(snapshot.error ?? ErrorCode.UNKNOWN);
+      return false;
+    }
+    if (Math.abs(snapshot.data.position - resumePosition) >= 1000) {
+      recovery.onError(ErrorCode.FILE_DECODE_ERROR);
+      return false;
+    }
+  }
+  if (!recovery) pendingNetworkResume = null;
   if (shouldPlay && myPauseToken === pauseToken) await play();
   if (resumeToken !== trackToken) return true;
   if (loaded.resolved.cacheRequest) {
@@ -484,42 +544,161 @@ export const reloadCurrentTrack = async (forcePlay?: boolean): Promise<boolean> 
   return true;
 };
 
-/** 同一首歌因源失效连续重载的次数，换歌时归零 */
-let sourceRecoveryCount = 0;
-/** sourceRecoveryCount 对应的 track id */
-let sourceRecoveryTrackId: string | null = null;
+/** 取消旧恢复并保留进度，停止和切歌调用方随后接管状态。 */
+export const cancelSourceRecovery = (): void => {
+  const operation = activeRecovery;
+  if (!operation) return;
+  activeRecovery = null;
+  operation.cancel();
+  loadToken++;
+  trackToken++;
+  seekTarget = null;
+  playback.setSeeking(false);
+  const status = useStatusStore();
+  status.networkReconnecting = false;
+  status.trackLoading = false;
+  status.state = "paused";
+  status.currentSource = null;
+  status.position = operation.position;
+  playback.setPlaying(false);
+  playback.setCurrentTime(operation.position, { force: true });
+  pendingNetworkResume = { trackId: operation.trackId, position: operation.position };
+  void window.api.player.stop();
+};
+
+/** 恢复期间及耗尽后，旧引擎的停止通知不能覆盖保留进度。 */
+export const isSourceRecoveryHoldingPosition = (): boolean =>
+  activeRecovery !== null ||
+  (pendingNetworkResume !== null && pendingNetworkResume.trackId === useMediaStore().track?.id);
 
 /**
- * 源失效恢复
- * 重载一次后仍失败则放弃跳曲，保持恢复前的播放 / 暂停态
+ * 源失效后保留曲目和进度，网络失败有限重试，其他失败沿用跳曲策略。
+ * @param manual - 用户主动播放时，先进行一次不占自动预算的静默加载
  */
-export const recoverFromSourceFailure = async (): Promise<void> => {
+export const recoverFromSourceFailure = async (manual = false): Promise<void> => {
+  if (activeRecovery) return;
   const track = useMediaStore().track;
   if (!track) return;
-  const wasPlaying = useStatusStore().isPlaying;
-  const myPauseToken = pauseToken;
-  // 本地文件源失效（文件被删/磁盘错误）没有重载意义，直接跳曲
+  const status = useStatusStore();
+  if (!manual && status.state === "stopped") return;
+  const wasPlaying = status.isPlaying;
   if (track.source === "local") {
     await nextTrack(wasPlaying);
     return;
   }
-  if (sourceRecoveryTrackId !== track.id) {
-    sourceRecoveryTrackId = track.id;
-    sourceRecoveryCount = 0;
-  }
-  // 最多重载一次
-  if (sourceRecoveryCount >= 1) {
-    sourceRecoveryCount = 0;
+  if (!manual && pendingNetworkResume?.trackId === track.id) return;
+  const settings = useSettingsStore();
+  const position =
+    pendingNetworkResume?.trackId === track.id
+      ? pendingNetworkResume.position
+      : Math.round(playback.getCurrentTime());
+  // 重开成功却尚未播过一秒就再次失效，保留原有坏源跳曲保护。
+  if (
+    !manual &&
+    lastSourceRecovery?.trackId === track.id &&
+    position < lastSourceRecovery.position + 1000
+  ) {
+    lastSourceRecovery = null;
     await nextTrack(wasPlaying);
     return;
   }
-  sourceRecoveryCount++;
-  // 重载失败（重新解析的 URL 仍失效 / 加载报错，且不会再有 sourceError 兜底）→ 立即跳曲
-  // 不传 forcePlay：遵从当前播放状态，暂停态下重载后保持暂停
-  const ok = await reloadCurrentTrack();
-  if (!ok) {
-    sourceRecoveryCount = 0;
-    await nextTrack(wasPlaying && myPauseToken === pauseToken);
+  const operation = new NetworkRecovery(
+    track.id,
+    position,
+    wasPlaying,
+    manual && settings.player.autoReconnect === false
+      ? 1
+      : (settings.player.reconnectAttempts ?? 10),
+    settings.player.reconnectFailureAction ?? "pause",
+  );
+  activeRecovery = operation;
+  status.networkReconnecting = true;
+  status.trackLoading = true;
+  status.position = position;
+  playback.setPlaying(false);
+  playback.setCurrentTime(position, { force: true });
+  const stopWatching = watch(
+    () => settings.player.autoReconnect,
+    (enabled) => {
+      if (enabled === false) cancelSourceRecovery();
+    },
+    { flush: "sync" },
+  );
+  let networkFailure = false;
+  let finalError: string | undefined;
+  let recovered = false;
+  let notified = false;
+  const lastAttempt = settings.player.autoReconnect !== false ? operation.maxAttempts : 0;
+  try {
+    if (settings.player.autoReconnect !== false || manual) {
+      // 用户主动播放先静默加载，确有网络失败后再进入可见重试。
+      for (let attempt = manual ? 0 : 1; attempt <= lastAttempt; attempt++) {
+        if (operation.signal.aborted) return;
+        if (attempt > 0) {
+          operation.notify(attempt);
+          notified = true;
+        }
+        finalError = undefined;
+        const ok = await reloadCurrentTrack(false, {
+          signal: operation.signal,
+          position,
+          onError: (error) => {
+            finalError = error;
+          },
+        });
+        if (operation.signal.aborted) return;
+        if (ok) {
+          recovered = true;
+          pendingNetworkResume = null;
+          break;
+        }
+        networkFailure =
+          finalError === ErrorCode.NETWORK_ERROR || finalError === ErrorCode.NETWORK_TIMEOUT;
+        if (!networkFailure) break;
+        status.state = operation.wantsPlay ? "playing" : "paused";
+        status.trackLoading = true;
+        status.position = position;
+        if (attempt < lastAttempt) await operation.wait();
+      }
+    } else {
+      networkFailure = true;
+    }
+  } finally {
+    stopWatching();
+    if (activeRecovery === operation) {
+      activeRecovery = null;
+      status.networkReconnecting = false;
+      status.trackLoading = false;
+    }
+  }
+  if (operation.signal.aborted) return;
+  if (recovered) {
+    operation.finish(notified ? "success" : undefined);
+    if (operation.wantsPlay) await play();
+    lastSourceRecovery = { trackId: track.id, position };
+    return;
+  }
+  if (!networkFailure) {
+    operation.finish();
+    if (finalError) handleError(finalError);
+    await nextTrack(operation.wantsPlay);
+    return;
+  }
+  operation.finish("error");
+  if (operation.failureAction === "stop" && !operation.pausedByUser) {
+    await stop();
+    return;
+  }
+  status.state = "paused";
+  status.currentSource = null;
+  status.position = position;
+  playback.setPlaying(false);
+  playback.setCurrentTime(position, { force: true });
+  pendingNetworkResume = { trackId: track.id, position };
+  void window.api.player.stop();
+  if (operation.failureAction === "next" && !operation.pausedByUser) {
+    pendingNetworkResume = null;
+    await nextTrack(operation.wantsPlay);
   }
 };
 
@@ -531,6 +710,17 @@ let pendingPlayAfterRestore = false;
 /** 恢复播放 */
 export const play = async (): Promise<void> => {
   const status = useStatusStore();
+  lastSourceRecovery = null;
+  if (activeRecovery) {
+    activeRecovery.wantsPlay = true;
+    status.state = "playing";
+    return;
+  }
+  if (pendingNetworkResume && pendingNetworkResume.trackId === useMediaStore().track?.id) {
+    status.state = "playing";
+    await recoverFromSourceFailure(true);
+    return;
+  }
   if (isRestoringLastTrack) {
     pendingPlayAfterRestore = true;
     return;
@@ -592,6 +782,10 @@ export const togglePlay = (): void => {
 /** 暂停播放 */
 export const pause = async (): Promise<void> => {
   pauseToken++;
+  if (activeRecovery) {
+    activeRecovery.wantsPlay = false;
+    activeRecovery.pausedByUser = true;
+  }
   const status = useStatusStore();
   const prev = status.state;
   status.state = "paused";
@@ -612,10 +806,15 @@ export const invalidatePlaybackOperation = (): number => {
 
 /** 停止播放并重置进度 */
 export const stop = async (): Promise<void> => {
+  cancelSourceRecovery();
+  pendingNetworkResume = null;
   const token = invalidatePlaybackOperation();
   invalidateNextTrackPreload();
   const status = useStatusStore();
   status.trackLoading = false;
+  // 同步记录停止意图，原生响应返回前的迟到错误也不能重新启动恢复。
+  status.state = "stopped";
+  playback.setPlaying(false);
   const result = await window.api.player.stop();
   if (token !== trackToken) return;
   if (result.success) {
@@ -637,6 +836,9 @@ let seekTarget: number | null = null;
  * @returns 是否已到达 seek 目标
  */
 export const hasReachedSeekTarget = (position: number): boolean => {
+  if (lastSourceRecovery && position >= lastSourceRecovery.position + 1000) {
+    lastSourceRecovery = null;
+  }
   if (seekTarget === null) return true;
   // 容差：后端推送的位置在 seek 目标 ±1s 内视为已到达
   if (Math.abs(position - seekTarget) < 1000) {
@@ -654,12 +856,18 @@ export const isSeeking = (): boolean => seekTarget !== null;
  * 跳转到指定播放位置
  * @param posMs - 目标位置（毫秒）
  * @param restartRound - 是否为单曲循环开启新的统计轮次
+ * @param onError - 热恢复需要知道进度恢复是否失败
  */
-export const seek = async (posMs: number, restartRound = false): Promise<void> => {
+export const seek = async (
+  posMs: number,
+  restartRound = false,
+  onError?: (error: string) => void,
+): Promise<void> => {
   const status = useStatusStore();
   // 歌曲加载中 seek 无意义：引擎此刻没有可 seek 的解码线程，
   // 且 seekTarget 残留会让加载完成后的 position 推送被持续丢弃
   if (status.trackLoading) return;
+  if (!onError) lastSourceRecovery = null;
   const token = invalidatePlaybackOperation();
   // 先冻结插值，再写入位置
   playback.setSeeking(true);
@@ -676,6 +884,10 @@ export const seek = async (posMs: number, restartRound = false): Promise<void> =
   if (result.success) {
     status.position = posMs;
     playback.setCurrentTime(posMs);
+  } else {
+    seekTarget = null;
+    playback.setSeeking(false);
+    onError?.(result.error ?? ErrorCode.UNKNOWN);
   }
 };
 
@@ -684,6 +896,7 @@ export const seek = async (posMs: number, restartRound = false): Promise<void> =
  * @param posMs - 目标位置（毫秒）
  */
 export const markSeek = (posMs: number): void => {
+  lastSourceRecovery = null;
   const status = useStatusStore();
   if (status.trackLoading) return;
   invalidatePlaybackOperation();
@@ -1502,6 +1715,8 @@ export const restoreLastTrack = async (): Promise<void> => {
 
 /** 清理事件订阅 */
 export const disposePlayer = (): void => {
+  cancelSourceRecovery();
+  pendingNetworkResume = null;
   disposeNextTrackPreload();
   stopQueueIndexSync?.();
   stopQueueIndexSync = null;

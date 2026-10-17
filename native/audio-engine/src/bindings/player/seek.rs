@@ -128,7 +128,6 @@ impl AudioPlayer {
                         // 远端源回退重开失败（多半 URL 过期）：发 sourceError 交 JS 重解析
                         if is_remote {
                             self.inner.lock().emit_source_error();
-                            return Ok(());
                         }
                         return Err(e);
                     }

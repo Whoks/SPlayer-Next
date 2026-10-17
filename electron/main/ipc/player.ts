@@ -102,7 +102,12 @@ const isNativeNetworkError = (error: unknown): boolean =>
   String(error).includes("[NetworkUnreachable]");
 const isNativeCancelledError = (error: unknown): boolean => String(error).includes("[Cancelled]");
 
-/** 根据原生错误特征和音源类型，将异常分类为标准 ErrorCode */
+/**
+ * 根据原生或取址错误和音源类型分类播放失败
+ * @param error - 原生加载或流媒体取址异常
+ * @param source - 实际音源或流媒体占位符
+ * @returns 可用于恢复策略的标准错误码
+ */
 const classifyLoadError = (error: unknown, source: string): ErrorCode => {
   const msg = error instanceof Error ? error.message : String(error);
   if (isNativeCancelledError(error)) {
@@ -116,6 +121,12 @@ const classifyLoadError = (error: unknown, source: string): ErrorCode => {
   }
   if (msg.includes("[DecodeFailed]")) {
     return ErrorCode.FILE_DECODE_ERROR;
+  }
+  if (source.startsWith("streaming:") && error instanceof Error) {
+    if (error.name === "TimeoutError") return ErrorCode.NETWORK_TIMEOUT;
+    if (error instanceof TypeError && /fetch failed|failed to fetch|network/i.test(msg)) {
+      return ErrorCode.NETWORK_ERROR;
+    }
   }
   if (isNativeNetworkError(error) || /^https?:\/\//i.test(source)) {
     return ErrorCode.NETWORK_ERROR;
@@ -691,7 +702,7 @@ export const registerPlayerIpc = (): void => {
         neteaseScrobble.onStopped();
         lastfm.onStopped();
       }
-      return fail(ErrorCode.UNKNOWN, error);
+      return fail(classifyLoadError(error, ""), error);
     }
   });
 

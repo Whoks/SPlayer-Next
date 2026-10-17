@@ -19,6 +19,7 @@ import {
   insertManyToQueue,
   invalidatePlaybackOperation,
   isSmartTransitionActive,
+  isSourceRecoveryHoldingPosition,
   isSeeking,
   markSeek,
   nextTrack,
@@ -69,7 +70,12 @@ export const handleEvent = async (event: PlayerEvent): Promise<void> => {
   switch (event.type) {
     case "status":
       // 歌曲加载中或 loading 事件不更新 UI，保持当前封面/进度/播放状态平滑过渡
-      if (event.data.state === "loading" || status.trackLoading) break;
+      if (
+        event.data.state === "loading" ||
+        status.trackLoading ||
+        isSourceRecoveryHoldingPosition()
+      )
+        break;
       /** 失败路径已置为空闲时，迟到的停止通知不能取消待执行的自动跳曲 */
       if (
         (event.data.state === "idle" || event.data.state === "stopped") &&
@@ -111,7 +117,7 @@ export const handleEvent = async (event: PlayerEvent): Promise<void> => {
       break;
     case "position": {
       // 歌曲加载中不更新进度
-      if (status.trackLoading) break;
+      if (status.trackLoading || isSourceRecoveryHoldingPosition()) break;
       // seek 后丢弃旧位置，直到后端推送的位置到达 seek 目标附近
       if (!hasReachedSeekTarget(event.data.position)) break;
       const adjusted = playback.setCurrentTime(event.data.position);
@@ -140,7 +146,7 @@ export const handleEvent = async (event: PlayerEvent): Promise<void> => {
       playback.setFftFrame(event.data.ldata, event.data.rdata);
       break;
     case "ended": {
-      if (isSmartTransitionActive()) break;
+      if (isSmartTransitionActive() || isSourceRecoveryHoldingPosition()) break;
       await finishCurrentTrack();
       break;
     }

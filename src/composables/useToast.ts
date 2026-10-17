@@ -16,6 +16,8 @@ export interface ToastInstance {
   id: number;
   /** 关闭此 toast */
   close: () => void;
+  /** 原位更新消息，提供 duration 时重新计时 */
+  update: (message: string, options?: ToastOptions & { type?: ToastType }) => void;
 }
 
 export interface ToastItem {
@@ -69,7 +71,32 @@ const push = (type: ToastType, message: string, options?: ToastOptions): ToastIn
       setTimeout(() => remove(id), duration),
     );
   }
-  return { id, close: () => remove(id) };
+  return {
+    id,
+    close: () => remove(id),
+    update: (message, options = {}) => {
+      const index = toasts.findIndex((item) => item.id === id);
+      if (index === -1) return;
+      toasts[index] = {
+        ...toasts[index],
+        message,
+        type: options.type ?? toasts[index].type,
+        closable: options.closable ?? toasts[index].closable,
+        icon: "icon" in options ? options.icon : toasts[index].icon,
+      };
+      if (options.duration !== undefined) {
+        const timer = timers.get(id);
+        if (timer) clearTimeout(timer);
+        timers.delete(id);
+        if (options.duration > 0) {
+          timers.set(
+            id,
+            setTimeout(() => remove(id), options.duration),
+          );
+        }
+      }
+    },
+  };
 };
 
 /** 全局 toast API */

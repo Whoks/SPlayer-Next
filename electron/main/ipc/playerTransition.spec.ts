@@ -204,6 +204,24 @@ describe("交接响应的主进程竞态保护", () => {
     expect(mocks.prepareTransition).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    [new TypeError("fetch failed"), "NETWORK_ERROR"],
+    [
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      "NETWORK_TIMEOUT",
+    ],
+    [new Error("流媒体账号或地址已更新，请重新选择歌曲"), "FILE_DECODE_ERROR"],
+    [new Error("流媒体音源与歌曲身份不一致"), "FILE_DECODE_ERROR"],
+    [new Error("PlaybackInfo: HTTP 403"), "FILE_DECODE_ERROR"],
+  ])("流媒体占位符取址失败按异常类型分类：%s", async (error, code) => {
+    mocks.streamingPrepare.mockRejectedValueOnce(error);
+    const result = await invoke("player:load", "streaming://server/song", {
+      meta: { id: "song", source: "streaming", serverId: "server", originalId: "song" },
+    });
+    expect(result).toEqual({ success: false, error: code });
+    expect(mocks.load).not.toHaveBeenCalled();
+  });
+
   it("流媒体加载由主进程解析地址，解码成功后才绑定播放会话", async () => {
     mocks.streamingPrepare.mockResolvedValueOnce({
       url: "https://server/audio",
@@ -268,5 +286,14 @@ describe("交接响应的主进程竞态保护", () => {
       success: false,
       error,
     });
+  });
+  it.each([
+    ["[NetworkUnreachable] offline", "NETWORK_ERROR"],
+    ["[DecodeFailed] invalid data", "FILE_DECODE_ERROR"],
+    ["[DeviceNotAvailable] output device", "DEVICE_NOT_FOUND"],
+    ["[Cancelled] replaced", "LOAD_SUPERSEDED"],
+  ])("进度恢复错误保留原生分类：%s", async (message, error) => {
+    mocks.seek.mockRejectedValueOnce(new Error(message));
+    expect(await invoke("player:seek", 42000)).toEqual({ success: false, error });
   });
 });

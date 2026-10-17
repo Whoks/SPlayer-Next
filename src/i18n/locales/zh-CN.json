@@ -520,7 +520,9 @@
     "shuffleMode": {
       "on": "随机播放",
       "off": "顺序播放"
-    }
+    },
+    "reconnectTrying": "网络连接错误，第 {attempt}/{total} 次重连中",
+    "reconnectSuccess": "已恢复连接"
   },
   "songList": {
     "title": "标题",
@@ -804,7 +806,8 @@
       "backupReset": "备份与重置",
       "debug": "调试",
       "preset": "强迫症配置",
-      "envInfo": "环境信息"
+      "envInfo": "环境信息",
+      "networkRecovery": "断网重连"
     },
     "about": {
       "checkUpdate": "检查更新",
@@ -2230,6 +2233,21 @@
       "button": "清空全部",
       "confirmTitle": "清空全部数据库缓存？",
       "confirmDesc": "将删除上方全部数据库缓存，操作不可恢复"
+    },
+    "autoReconnect": {
+      "label": "自动重连",
+      "description": "网络波动时尝试数次重新加载"
+    },
+    "reconnectAttempts": {
+      "label": "最大重连次数",
+      "description": "断网重连尝试的最大次数"
+    },
+    "reconnectFailureAction": {
+      "label": "失败后行为",
+      "description": "重连尝试全部失败后的切曲策略",
+      "pause": "保留进度并暂停当前歌曲",
+      "next": "跳到下一首",
+      "stop": "归零当前歌曲播放进度"
     }
   },
   "collection": {

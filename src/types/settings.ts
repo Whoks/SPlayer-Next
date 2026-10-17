@@ -262,6 +262,12 @@ export interface PlayerSettings {
   songLevel: QualityLevel;
   /** 允许完整音源不可用时播放试听片段 */
   allowTrialPlay: boolean;
+  /** 音源网络失败后是否自动重连 */
+  autoReconnect: boolean;
+  /** 一轮自动恢复的最大尝试次数，不含用户主动播放的首次加载 */
+  reconnectAttempts: number;
+  /** 重连耗尽后的播放策略 */
+  reconnectFailureAction: "pause" | "next" | "stop";
   /** 时间显示格式 */
   timeFormat: TimeFormat;
   /** 显示进度条悬浮信息 */

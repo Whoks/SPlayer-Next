@@ -112,6 +112,38 @@ const playerCategory: SettingCategory = {
       ],
     },
     {
+      id: "networkRecovery",
+      items: [
+        {
+          key: "autoReconnect",
+          type: "switch",
+          binding: { store: "settings", path: "player.autoReconnect" },
+          defaultValue: true,
+          children: [
+            {
+              key: "reconnectAttempts",
+              type: "number",
+              binding: { store: "settings", path: "player.reconnectAttempts" },
+              min: 1,
+              step: 1,
+              defaultValue: 10,
+            },
+          ],
+        },
+        {
+          key: "reconnectFailureAction",
+          type: "select",
+          binding: { store: "settings", path: "player.reconnectFailureAction" },
+          options: [
+            { value: "pause", labelKey: "settings.reconnectFailureAction.pause" },
+            { value: "next", labelKey: "settings.reconnectFailureAction.next" },
+            { value: "stop", labelKey: "settings.reconnectFailureAction.stop" },
+          ],
+          defaultValue: "pause",
+        },
+      ],
+    },
+    {
       id: "playbackTransition",
       items: [
         {
